@@ -1,151 +1,70 @@
-import streamlit as st
-import pandas as pd
-import math
+import os
+from io import BytesIO
 from pathlib import Path
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+import pandas as pd
+import streamlit as st
+from anthropic import Anthropic
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+DATA_FILE = Path(__file__).parent / "StudentsPerformance.csv"
+MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
-
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
-
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
-
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
+@st.cache_data(ttl=86400, show_spinner=False)
+def generate_data_description(csv_contents: bytes, model: str, api_key: str) -> str:
+    data = pd.read_csv(BytesIO(csv_contents))
+    score_columns = ["math score", "reading score", "writing score"]
+    score_summary = data[score_columns].describe().round(1).to_string()
+    group_summary = (
+        data.groupby(["race/ethnicity", "gender"])[["math score", "reading score"]]
+        .mean()
+        .round(1)
+        .to_string()
     )
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
-
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
+    client = Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=model,
+        max_tokens=250,
+        system=(
+            "당신은 교육 데이터 분석가입니다. 제공된 집계 수치만 근거로 한국어로 "
+            "학생 성적 데이터의 특징을 3문장 이내로 간략히 설명하세요. "
+            "상관관계를 인과관계로 단정하지 마세요."
+        ),
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    f"행 수: {len(data)}\n\n점수 기술 통계:\n{score_summary}\n\n"
+                    f"인종/민족 및 성별별 수학·읽기 평균:\n{group_summary}"
+                ),
+            }
+        ],
+    )
+    return "\n".join(
+        block.text for block in response.content if getattr(block, "type", None) == "text"
+    )
 
 
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
+def get_api_key() -> str | None:
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    secrets_file = Path(__file__).parent / ".streamlit" / "secrets.toml"
+    if not api_key and secrets_file.exists():
+        api_key = st.secrets.get("ANTHROPIC_API_KEY")
+    return api_key
 
-st.header(f'GDP in {to_year}', divider='gray')
 
-''
+st.set_page_config(page_title="학생 성적 데이터 설명", page_icon="📚")
 
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+if not DATA_FILE.exists():
+    st.error("프로젝트 루트에서 StudentsPerformance.csv 파일을 찾을 수 없습니다.")
+else:
+    api_key = get_api_key()
+    if not api_key:
+        st.info("AI 설명을 보려면 ANTHROPIC_API_KEY를 Codespaces 환경 변수 또는 .streamlit/secrets.toml에 설정하세요.")
+    else:
+        try:
+            description = generate_data_description(DATA_FILE.read_bytes(), MODEL, api_key)
+            st.markdown(description)
+        except Exception:
+            st.error("AI 설명을 생성하지 못했습니다. API 키와 모델 설정을 확인해 주세요.")
