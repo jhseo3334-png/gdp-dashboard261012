@@ -1,16 +1,15 @@
 from io import BytesIO
-from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-DATA_FILE = Path(__file__).resolve().parents[1] / "StudentsPerformance.csv"
-
-
 @st.cache_data
 def read_csv_contents(contents: bytes) -> pd.DataFrame:
-    return pd.read_csv(BytesIO(contents))
+    try:
+        return pd.read_csv(BytesIO(contents))
+    except UnicodeDecodeError:
+        return pd.read_csv(BytesIO(contents), encoding="cp949")
 
 
 st.set_page_config(page_title="학생 성적 분석", page_icon="📊", layout="wide")
@@ -20,24 +19,40 @@ uploaded_file = st.file_uploader("분석할 CSV 파일", type="csv")
 
 try:
     if uploaded_file is not None:
-        data = read_csv_contents(uploaded_file.getvalue())
-        st.caption(f"업로드한 파일: {uploaded_file.name}")
-    elif DATA_FILE.exists():
-        data = read_csv_contents(DATA_FILE.read_bytes())
-        st.caption("기본 데이터: StudentsPerformance.csv")
+        csv_contents = uploaded_file.getvalue()
+        data = read_csv_contents(csv_contents)
+        st.session_state["uploaded_csv_contents"] = csv_contents
+        st.session_state["uploaded_csv_name"] = uploaded_file.name
+    elif st.session_state.get("uploaded_csv_contents"):
+        data = read_csv_contents(st.session_state["uploaded_csv_contents"])
+        st.caption(f"현재 분석 파일: {st.session_state.get('uploaded_csv_name', 'CSV')}")
     else:
         st.info("CSV 파일을 업로드해 분석을 시작하세요.")
         st.stop()
-except (UnicodeDecodeError, pd.errors.ParserError) as error:
+except (UnicodeDecodeError, pd.errors.EmptyDataError, pd.errors.ParserError) as error:
     st.error(f"CSV 파일을 읽지 못했습니다: {error}")
     st.stop()
+
+if st.button("업로드한 데이터 지우기"):
+    st.session_state.pop("uploaded_csv_contents", None)
+    st.session_state.pop("uploaded_csv_name", None)
+    st.rerun()
 
 if data.empty:
     st.warning("업로드한 CSV에 분석할 데이터가 없습니다.")
     st.stop()
 
 numeric_columns = data.select_dtypes(include="number").columns.tolist()
-category_columns = data.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
+category_columns = [
+    column
+    for column in data.columns
+    if (
+        pd.api.types.is_object_dtype(data[column])
+        or pd.api.types.is_string_dtype(data[column])
+        or isinstance(data[column].dtype, pd.CategoricalDtype)
+        or pd.api.types.is_bool_dtype(data[column])
+    )
+]
 
 if not numeric_columns:
     st.warning("기술 통계를 계산할 숫자형 열이 없습니다.")
@@ -46,8 +61,7 @@ if not numeric_columns:
 default_scores = [
     column for column in ("math score", "reading score") if column in numeric_columns
 ]
-default_group = "race/ethnicity" if "race/ethnicity" in category_columns else category_columns[0] if category_columns else None
-default_color = "gender" if "gender" in category_columns and "gender" != default_group else None
+default_group = category_columns[0] if category_columns else None
 
 with st.sidebar:
     st.header("분석 설정")
